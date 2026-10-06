@@ -199,6 +199,7 @@ public final class LicenseManager {
 
                     cachedActivated = true;
                     Logger.printInfo(() -> "License activated successfully for key: " + cleanKey);
+                    RemoteManager.init("YouTube");
                     Utils.runOnMainThread(() -> callback.accept(new ValidationResult(true, "Sikeres aktiválás!")));
                 } else if ("BANNED".equalsIgnoreCase(status)) {
                     deactivate();
@@ -299,6 +300,7 @@ public final class LicenseManager {
     public static void checkOnStartup() {
         if (isActivated()) {
             checkInBackground();
+            RemoteManager.init("YouTube");
             return;
         }
 
