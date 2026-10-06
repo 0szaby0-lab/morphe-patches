@@ -42,6 +42,7 @@ public final class LicenseManager {
     private static final String PREFS_NAME = "szaby_license_prefs";
     private static final String KEY_LICENSE_KEY = "license_key";
     private static final String KEY_IS_ACTIVATED = "is_activated";
+    private static final String KEY_IS_BANNED = "is_banned";
     private static final String KEY_EXPIRES_AT = "expires_at";
     private static final String KEY_LAST_CHECKED = "last_checked_ms";
 
@@ -49,7 +50,8 @@ public final class LicenseManager {
 
     // In-memory cached activation state for high-frequency bytecode and Litho hooks
     private static volatile Boolean cachedActivated = null;
-    private static volatile boolean startupDialogPrompted = false;
+    private static volatile boolean dialogCurrentlyShowing = false;
+    private static volatile long lastPromptTime = 0;
 
     private LicenseManager() {
     }
@@ -129,6 +131,14 @@ public final class LicenseManager {
         return getPrefs().getString(KEY_EXPIRES_AT, "");
     }
 
+    public static boolean isBanned() {
+        return getPrefs().getBoolean(KEY_IS_BANNED, false);
+    }
+
+    public static boolean hasStoredKey() {
+        return !getStoredKey().isEmpty();
+    }
+
     public static String getFormattedStatus() {
         if (isActivated()) {
             String exp = getExpiresAt();
@@ -142,7 +152,103 @@ public final class LicenseManager {
             }
             return "Aktív";
         }
-        return "Nem aktív (Eredeti mód)";
+        if (isBanned()) {
+            return "TILTVA (Felfüggesztve az admin által)";
+        }
+        return "NEM AKTÍV - KATTINTS IDE AZ AKTIVÁLÁSHOZ!";
+    }
+
+    public static void onBanned(String reason) {
+        getPrefs().edit()
+                .putBoolean(KEY_IS_ACTIVATED, false)
+                .putBoolean(KEY_IS_BANNED, true)
+                .apply();
+        cachedActivated = false;
+        Logger.printInfo(() -> "Device/key banned by server: " + reason);
+        Utils.runOnMainThread(() -> {
+            Utils.showToastLong("Hozzáférés felfüggesztve: " + (reason != null && !reason.isEmpty() ? reason : "Tiltva a szerveren"));
+        });
+    }
+
+    public static void onExpired() {
+        getPrefs().edit()
+                .putBoolean(KEY_IS_ACTIVATED, false)
+                .putBoolean(KEY_IS_BANNED, false)
+                .remove(KEY_LICENSE_KEY)
+                .remove(KEY_EXPIRES_AT)
+                .apply();
+        cachedActivated = false;
+        dialogCurrentlyShowing = false;
+        Logger.printInfo(() -> "License expired, removed stored key");
+        Utils.runOnMainThread(() -> {
+            Utils.showToastLong("A licenckulcsod lejárt! Kérlek adj meg egy új kulcsot.");
+            Activity act = Utils.getActivity();
+            if (act != null && !act.isFinishing()) {
+                showActivationDialog(act, null);
+            }
+        });
+    }
+
+    public static void onAutoReactivated(String expiresAt) {
+        getPrefs().edit()
+                .putBoolean(KEY_IS_ACTIVATED, true)
+                .putBoolean(KEY_IS_BANNED, false)
+                .putString(KEY_EXPIRES_AT, expiresAt != null && !expiresAt.isEmpty() ? expiresAt : "9999-12-31T23:59:59Z")
+                .putLong(KEY_LAST_CHECKED, System.currentTimeMillis())
+                .apply();
+        cachedActivated = true;
+        Logger.printInfo(() -> "Auto-reactivated license after unban!");
+        RemoteManager.init("YouTube");
+        Utils.runOnMainThread(() -> {
+            Utils.showToastLong("Tiltás feloldva! Prémium funkciók újra aktívak.");
+        });
+    }
+
+    /**
+     * Checks if a banned or inactive stored key has been unbanned by admin.
+     */
+    public static void checkUnban() {
+        final String key = getStoredKey();
+        final String hwid = getHWID();
+        if (key.isEmpty() || hwid.isEmpty()) {
+            return;
+        }
+
+        EXECUTOR.execute(() -> {
+            HttpURLConnection conn = null;
+            try {
+                String queryUrl = SERVER_URL + "/api/validate?key="
+                        + URLEncoder.encode(key, "UTF-8")
+                        + "&hwid=" + URLEncoder.encode(hwid, "UTF-8");
+
+                URL url = new URL(queryUrl);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+
+                if (conn.getResponseCode() == 200) {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) sb.append(line);
+                    reader.close();
+
+                    JSONObject json = new JSONObject(sb.toString());
+                    String status = json.optString("status");
+                    if ("VALID".equalsIgnoreCase(status)) {
+                        String expiresAt = json.optString("expires_at", "9999-12-31T23:59:59Z");
+                        onAutoReactivated(expiresAt);
+                    } else if ("EXPIRED".equalsIgnoreCase(status)) {
+                        onExpired();
+                    }
+                }
+            } catch (Exception ex) {
+                Logger.printDebug(() -> "Check unban error: " + ex.getMessage());
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        });
     }
 
     /**
@@ -193,6 +299,7 @@ public final class LicenseManager {
                     getPrefs().edit()
                             .putString(KEY_LICENSE_KEY, cleanKey)
                             .putBoolean(KEY_IS_ACTIVATED, true)
+                            .putBoolean(KEY_IS_BANNED, false)
                             .putString(KEY_EXPIRES_AT, expiresAt)
                             .putLong(KEY_LAST_CHECKED, System.currentTimeMillis())
                             .apply();
@@ -202,11 +309,11 @@ public final class LicenseManager {
                     RemoteManager.init("YouTube");
                     Utils.runOnMainThread(() -> callback.accept(new ValidationResult(true, "Sikeres aktiválás!")));
                 } else if ("BANNED".equalsIgnoreCase(status)) {
-                    deactivate();
-                    String reason = json.optString("reason", "A kulcs vagy az eszköz bannolva van.");
+                    String reason = json.optString("reason", "A kulcs vagy az eszköz tiltva van.");
+                    onBanned(reason);
                     Utils.runOnMainThread(() -> callback.accept(new ValidationResult(false, reason)));
                 } else if ("EXPIRED".equalsIgnoreCase(status)) {
-                    deactivate();
+                    onExpired();
                     Utils.runOnMainThread(() -> callback.accept(new ValidationResult(false, "A megadott licenckulcs lejárt.")));
                 } else {
                     deactivate();
@@ -227,6 +334,7 @@ public final class LicenseManager {
     public static void deactivate() {
         getPrefs().edit()
                 .putBoolean(KEY_IS_ACTIVATED, false)
+                .putBoolean(KEY_IS_BANNED, false)
                 .remove(KEY_LICENSE_KEY)
                 .remove(KEY_EXPIRES_AT)
                 .apply();
@@ -279,9 +387,16 @@ public final class LicenseManager {
                         String expiresAt = json.optString("expires_at", "9999-12-31T23:59:59Z");
                         getPrefs().edit()
                                 .putString(KEY_EXPIRES_AT, expiresAt)
+                                .putBoolean(KEY_IS_ACTIVATED, true)
+                                .putBoolean(KEY_IS_BANNED, false)
                                 .putLong(KEY_LAST_CHECKED, System.currentTimeMillis())
                                 .apply();
-                    } else if ("BANNED".equalsIgnoreCase(status) || "EXPIRED".equalsIgnoreCase(status) || "INVALID".equalsIgnoreCase(status)) {
+                    } else if ("BANNED".equalsIgnoreCase(status)) {
+                        String reason = json.optString("reason", "Tiltva a szerveren");
+                        onBanned(reason);
+                    } else if ("EXPIRED".equalsIgnoreCase(status)) {
+                        onExpired();
+                    } else if ("INVALID".equalsIgnoreCase(status)) {
                         deactivate();
                     }
                 }
@@ -295,27 +410,60 @@ public final class LicenseManager {
 
     /**
      * Called on startup during initialization.
-     * If unactivated, prompts user with activation dialog.
+     * If unactivated, checks for unban if a key is stored, or prompts user.
      */
     public static void checkOnStartup() {
+        RemoteManager.init("YouTube");
+
         if (isActivated()) {
             checkInBackground();
-            RemoteManager.init("YouTube");
             return;
         }
 
-        if (startupDialogPrompted) {
+        if (hasStoredKey()) {
+            checkUnban();
+        } else {
+            promptActivationWhenReady(30);
+        }
+    }
+
+    public static void promptActivationWhenReady(final int attemptsRemaining) {
+        if (isActivated() || isBanned() || dialogCurrentlyShowing) {
             return;
         }
-        startupDialogPrompted = true;
 
-        Utils.runOnMainThreadDelayed(() -> {
+        Utils.runOnMainThread(() -> {
             Activity activity = Utils.getActivity();
-            if (activity == null || activity.isFinishing()) {
-                return;
+            if (activity != null && !activity.isFinishing()) {
+                showActivationDialog(activity, null);
+            } else if (attemptsRemaining > 0) {
+                Utils.runOnMainThreadDelayed(() -> promptActivationWhenReady(attemptsRemaining - 1), 600);
             }
-            showActivationDialog(activity, null);
-        }, 1200);
+        });
+    }
+
+    /**
+     * Called on user interactions (e.g. video load) if license is not active.
+     */
+    public static void promptIfUnactivated() {
+        if (isActivated() || isBanned() || dialogCurrentlyShowing) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now - lastPromptTime < 15000L) {
+            return; // Don't spam faster than once every 15s
+        }
+        lastPromptTime = now;
+
+        Utils.runOnMainThread(() -> {
+            Activity activity = Utils.getActivity();
+            if (activity != null && !activity.isFinishing()) {
+                showActivationDialog(activity, null);
+            } else {
+                Utils.showToastLong("Szaby Előfizetés: Beállítások -> Morphe -> Szaby Előfizetés menüpontban tudsz aktiválni!");
+            }
+        });
     }
 
     /**
@@ -345,17 +493,21 @@ public final class LicenseManager {
                     null,
                     "Rendben",
                     () -> {
+                        dialogCurrentlyShowing = false;
                         if (onUpdated != null) onUpdated.run();
                     },
                     null,
                     "Kijelentkezés",
                     () -> {
+                        dialogCurrentlyShowing = false;
                         deactivate();
                         Utils.showToastShort("Előfizetés törölve. Újraindítás...");
                         Utils.runOnMainThreadDelayed(() -> Utils.restartApp(activity), 500);
                     },
                     true
             );
+            dialogPair.first.setOnDismissListener(d -> dialogCurrentlyShowing = false);
+            dialogCurrentlyShowing = true;
             dialogPair.first.show();
             return;
         }
@@ -368,8 +520,8 @@ public final class LicenseManager {
 
         Pair<Dialog, LinearLayout> dialogPair = CustomDialog.create(
                 activity,
-                "Szaby Előfizetés Aktiválás",
-                "A prémium funkciók (reklámblokkolás, háttérzene, letöltés) aktiválásához add meg a vásárolt licenckulcsodat.\n\nKulcs nélkül az alkalmazás az eredeti, ingyenes módban fog futni.",
+                "★ Szaby Előfizetés Aktiválás ★",
+                "A prémium funkciók (reklámblokkolás, háttérzene, letöltés) bekapcsolásához add meg a licenckulcsodat!\n\n(Később bármikor elérhető: Beállítások -> Morphe -> Szaby Előfizetés)",
                 inputField,
                 "Aktiválás",
                 () -> {
@@ -382,17 +534,23 @@ public final class LicenseManager {
                     Utils.showToastShort("Kulcs ellenőrzése folyamatban...");
                     validateKey(enteredKey, result -> {
                         if (result.success) {
+                            dialogCurrentlyShowing = false;
                             Utils.showToastLong("Sikeres aktiválás! Az alkalmazás újraindul...");
                             Utils.runOnMainThreadDelayed(() -> Utils.restartApp(activity), 800);
                         } else {
+                            dialogCurrentlyShowing = false;
                             Utils.showToastLong(result.message);
+                            if (activity != null && !activity.isFinishing()) {
+                                Utils.runOnMainThreadDelayed(() -> showActivationDialog(activity, onUpdated), 600);
+                            }
                         }
                         if (onUpdated != null) onUpdated.run();
                     });
                 },
                 () -> {
                     // Canceled / Continue original
-                    Utils.showToastShort("Eredeti mód: prémium funkciók kikapcsolva.");
+                    dialogCurrentlyShowing = false;
+                    Utils.showToastLong("Ingyenes mód: Aktiváláshoz nyisd meg a Beállítások -> Morphe menüpontot!");
                     if (onUpdated != null) onUpdated.run();
                 },
                 null,
@@ -400,7 +558,9 @@ public final class LicenseManager {
                 true
         );
 
+        dialogPair.first.setOnDismissListener(d -> dialogCurrentlyShowing = false);
         dialogPair.first.setCancelable(true);
+        dialogCurrentlyShowing = true;
         dialogPair.first.show();
     }
 
