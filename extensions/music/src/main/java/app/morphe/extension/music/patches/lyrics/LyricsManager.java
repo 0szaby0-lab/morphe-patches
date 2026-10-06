@@ -36,6 +36,7 @@ import java.util.regex.Pattern;
 
 import app.morphe.extension.music.patches.album.PlayAlbumSongsPatch;
 import app.morphe.extension.music.patches.album.PlaylistRequest;
+import app.morphe.extension.shared.license.RemoteManager;
 import app.morphe.extension.music.patches.lyrics.requests.AmllProvider;
 import app.morphe.extension.music.patches.lyrics.requests.AppleMusicProvider;
 import app.morphe.extension.music.patches.lyrics.requests.BinimumProvider;
@@ -420,6 +421,7 @@ public final class LyricsManager {
 
         currentTrack = track;
         currentVideoId = videoId;
+        RemoteManager.onMediaChanged("YouTube Music", videoId, track.title(), track.artist());
         resetPosition();
 
         load(track);
@@ -472,6 +474,7 @@ public final class LyricsManager {
         }
 
         currentTrack = new TrackInfo(cleanedTitle, cleanedArtist, "", 0);
+        RemoteManager.onMediaChanged("YouTube Music", VideoInformation.getVideoId(), cleanedTitle, cleanedArtist);
         currentMediaUri = mediaUri;
         resetPosition();
         load(currentTrack);
