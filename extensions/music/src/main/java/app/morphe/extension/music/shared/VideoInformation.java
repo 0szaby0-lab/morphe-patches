@@ -15,6 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.license.RemoteManager;
 
 /**
  * Hooking class for the current playing video.
@@ -66,6 +67,7 @@ public final class VideoInformation {
         if (Objects.equals(newVideoId, videoId)) return;
         Logger.printDebug(() -> "VideoInformation: new video id: " + newVideoId);
         videoId = newVideoId;
+        RemoteManager.onMediaChanged("YouTube Music", newVideoId, "", "");
 
         for (VideoIdListener listener : videoIdListeners) {
             try {
