@@ -24,6 +24,7 @@ import java.util.regex.Pattern;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.license.RemoteManager;
 import app.morphe.extension.shared.patches.ExoPlayerInterface;
 import app.morphe.extension.shared.patches.components.ContextInterface;
 import app.morphe.extension.youtube.patches.originaltitles.RestoreOriginalTitlesPatch;
@@ -326,6 +327,7 @@ public final class VideoInformation {
     public static void setChannelName(String cName) {
         channelName = cName != null ? cName : "";
         Logger.printDebug(() -> "Extracted Channel Name: " + channelName);
+        RemoteManager.onMediaChanged("YouTube", videoId, videoTitle, channelName);
     }
 
     public static String getChannelName() {
@@ -338,6 +340,7 @@ public final class VideoInformation {
     public static void setVideoTitle(String title) {
         videoTitle = title != null ? title : "";
         Logger.printDebug(() -> "Extracted Video Title: " + videoTitle);
+        RemoteManager.onMediaChanged("YouTube", videoId, videoTitle, channelName);
     }
 
     /**
@@ -356,6 +359,7 @@ public final class VideoInformation {
         if (!videoId.equals(newlyLoadedVideoId)) {
             Logger.printDebug(() -> "New video ID: " + newlyLoadedVideoId);
             videoId = newlyLoadedVideoId;
+            RemoteManager.onMediaChanged("YouTube", videoId, videoTitle, channelName);
         }
     }
 
